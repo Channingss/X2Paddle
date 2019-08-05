@@ -2,11 +2,21 @@
 X2Paddle支持将其余深度学习框架训练得到的模型，转换至PaddlePaddle模型。  
 X2Paddle is a toolkit for converting trained model to PaddlePaddle from other deep learning frameworks.
 
+## 更新历史
+2019.08.05
+1. 统一tensorflow/caffe(onnx的代码即将release)模型转换代码和对外接口
+2. 解决上一版caffe2fluid无法转换多分支模型的问题
+3. 解决Windows上保存模型无法加载的问题
+4. 新增optimizer，优化代码结构，合并conv、batch_norm的bias和激活函数
+
 ## 环境依赖
 
 python >= 3.5  
 paddlepaddle >= 1.5.0  
-tensorflow == 1.14.0  
+
+**以下依赖只需对应安装自己需要的即可**  
+转换tensorflow模型 ： tensorflow == 1.14.0  
+转换caffe模型 ： caffe == 1.0.0  
 
 ## 安装
 ```
@@ -22,6 +32,9 @@ x2paddle --framework=tensorflow --model=tf_model.pb --save_dir=pd_model
 ```
 x2paddle --framework=caffe --prototxt=deploy.proto --weight=deploy.caffemodel --save_dir=pd_model
 ```
+### ONNX
+即将release，目前仍可使用[onnx2fluid](https://github.com/PaddlePaddle/X2Paddle/tree/master/onnx2fluid)
+
 ### 参数选项
 | 参数 | |
 |----------|--------------|
@@ -40,3 +53,4 @@ x2paddle --framework=caffe --prototxt=deploy.proto --weight=deploy.caffemodel --
 ## Related Docs
 1. [X2Paddle使用过程中常见问题](Q&A.md)  
 2. [如何导出TensorFlow的pb模型](export_tf_model.md)
+3. [X2Paddle测试模型库](test_model_zoo.md)
