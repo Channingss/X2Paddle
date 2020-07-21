@@ -48,6 +48,7 @@ class ONNXGraphNode(GraphNode):
         self.out_shapes = list()
         self.dtype = None
         self.which_child = {}
+        self.middle_node = {}
 
     def get_attr_map(self):
         """
@@ -88,6 +89,17 @@ class ONNXGraphNode(GraphNode):
         if name not in self.attr_map:
             return default
         return self.attr_map[name]
+
+    def get_name(self, op_type, suffix):
+        """
+        generate name of middle nodes
+        """
+        if name not in self.middle_node:
+            self.middle_node[op_type] = 0
+        else:
+            self.middle_node[op_type] += 1
+        return self.layer + '_' + op_type + '_' + suffix + str(self.middle_node[
+            op_type])
 
 
 class ONNXGraphDataNode(GraphNode):

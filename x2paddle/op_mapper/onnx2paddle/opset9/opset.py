@@ -1146,7 +1146,6 @@ class OpSet9():
     def NonZero(self, node):
         val_x = self.graph.get_input_node(node, idx=0, copy=True)
         val_x_dim = len(val_x.out_shapes[0])
-        print(val_x.layer_name, val_x.out_shapes[0])
         if val_x_dim == 1:
             node.fluid_code.add_layer("nonzero", inputs=val_x, output=val_x)
             node.fluid_code.add_layer(
@@ -1360,10 +1359,10 @@ class OpSet9():
         val_x = self.graph.get_input_node(node, idx=0, copy=True)
         val_w = self.graph.get_input_node(node, idx=1, copy=True)
         val_r = self.graph.get_input_node(node, idx=2, copy=True)
-
         val_b = None
         val_len = None
         val_xh = None
+
         miss_arg_num = 0
         num_ipt = len(node.layer.input)
         if num_ipt > 3 and node.layer.input[3] != '':
@@ -1381,16 +1380,15 @@ class OpSet9():
 
         x_shape = val_x.out_shapes[0]
 
-        assert x_shape[1] == 1, 'only X with batch_size = 1 supported'
         assert node.get_attr('clip', None) is None, 'clipping not supported'
-
+        w_shape = val_w.out_shapes[0]
         hidden_size = node.get_attr('hidden_size', None)
         if hidden_size is None:
             r_shape = val_r.out_shapes[0]
             if r_shape:
                 hidden_size = r_shape[-1]
         if hidden_size is None:
-            w_shape = var_w.out_shapes[0]
+            w_shape = val_w.out_shapes[0]
             if w_shape:
                 hidden_size = w_shape[-2] // 3
         if hidden_size is None and val_b:
@@ -1403,34 +1401,37 @@ class OpSet9():
                 hidden_size = xh_shape[-1]
 
         direction = node.get_attr('direction', 'forward')
-        assert direction != 'bidirectional', 'direction = bidirectional not supported'
 
         activations = node.get_attr('activations', ['Sigmoid', 'Tanh'])
         assert len(activations) == 2, 'bidirectional operation not supported'
 
-        assert node.get_attr('linear_before_reset',
-                             0) == 0, 'only linear_before_reset = 0 supported'
+        #assert node.get_attr('linear_before_reset',
+        #                     0) == 0, 'only linear_before_reset = 0 supported'
 
         activations = [s.lower() for s in activations]
         gate_activation, candidate_activation = activations
         is_reverse = direction == 'reverse'
 
         var_x0 = node.layer_name + '_x0'
-        node.fluid_code.add_layer(
-            'squeeze',
-            inputs=val_x,
-            output=var_x0,
-            param_attr={'axes': [1],
-                        'name': string(var_x0)})
-
         var_w0 = node.layer_name + '_w0'
         node.fluid_code.add_layer(
-            'squeeze',
+            'reshape',
+            inputs=val_x,
+            output=var_x0,
+            param_attr={
+                'shape': [x_shape[0] * x_shape[1], x_shape[2]],
+                'name': string(var_x0)
+            })
+        node.fluid_code.add_layer(
+            'reshape',
             inputs=val_w,
             output=var_w0,
-            param_attr={'axes': [0],
-                        'name': string(var_w0)})
+            param_attr={
+                'shape': [w_shape[0] * w_shape[1], w_shape[2]],
+                'name': string(var_w0)
+            })
 
+        print(x_shape, w_shape)
         var_fc = node.layer_name + '_fc'
         var_mm = (node.layer_name + '_mm') if val_b else var_fc
         node.fluid_code.add_layer(
@@ -1444,22 +1445,6 @@ class OpSet9():
                 'name': string(var_mm)
             })
 
-        var_r0 = node.layer_name + '_r0'
-        node.fluid_code.add_layer(
-            'squeeze',
-            inputs=val_r,
-            output=var_r0,
-            param_attr={'axes': [0],
-                        'name': string(var_r0)})
-
-        var_r0t = node.layer_name + '_r0t'
-
-        node.fluid_code.add_layer(
-            'transpose',
-            inputs=var_r0,
-            output=var_r0t,
-            param_attr={'perm': [1, 0],
-                        'name': string(var_r0t)})
         if val_b:
             var_bi = node.layer_name + '_bi'
             var_bh = node.layer_name + '_bh'
@@ -1473,64 +1458,236 @@ class OpSet9():
                     'name': string(node.layer_name + '.b/split')
                 })
             var_bi0 = node.layer_name + '_bi0'
-            node.fluid_code.add_layer(
-                'squeeze',
-                inputs=var_bi,
-                output=var_bi0,
-                param_attr={'axes': [0],
-                            'name': string(var_bi0)})
-
+            if direction == 'bidirectional':
+                node.fluid_code.add_layer(
+                    'reshape',
+                    inputs=var_bi,
+                    output=var_bi0,
+                    param_attr={
+                        'shape': [hidden_size * 6],
+                        'name': string(var_bi0)
+                    })
+            else:
+                node.fluid_code.add_layer(
+                    'reshape',
+                    inputs=val_b,
+                    output=var_bi0,
+                    param_attr={
+                        'shape': [hidden_size * 3],
+                        'name': string(var_bi0)
+                    })
             node.fluid_code.add_layer(
                 'elementwise_add',
-                inputs=[var_mm, var_bi0],
+                inputs={'x': var_mm,
+                        'y': var_bi0},
                 output=var_fc,
                 param_attr={
-                    'axes': 1,
+                    'axis': 1,
                     'name': string(node.layer_name + '.i/bias')
                 })
-
-        if val_xh:
-            var_xh0 = node.layer_name + '_xh0'
+        if direction == 'bidirectional':
+            var_ipt_forward = node.layer_name + '_ipt_forward'
+            var_ipt_backward = node.layer_name + '_ipt_backward'
+            node.fluid_code.add_layer(
+                'split',
+                inputs=var_fc,
+                output=var_ipt_forward + ',' + var_ipt_backward,
+                param_attr={
+                    'dim': 1,
+                    'num_or_sections': [hidden_size * 3, hidden_size * 3],
+                    'name': string(node.layer_name + '_ipt_split')
+                })
+            var_r_forward = node.layer_name + '_r_forward'
+            var_r_backward = node.layer_name + '_r_backward'
+            node.fluid_code.add_layer(
+                'split',
+                inputs=val_r,
+                output=var_r_forward + ',' + var_r_backward,
+                param_attr={
+                    'dim': 0,
+                    'num_or_sections': [1, 1],
+                    'name': string(node.layer_name + '_r_split')
+                })
             node.fluid_code.add_layer(
                 'squeeze',
-                inputs=val_xh,
-                output=var_xh0,
-                param_attr={'axes': [1],
-                            'name': string(var_xh0)})
-        var_y00 = node.layer_name + '_y00'
-
-        attr = {
-            'origin_mode': True,
-            'h_0': var_xh0 if val_xh else None,
-            'is_reverse': is_reverse,
-            'gate_activation': string(gate_activation),
-            'candidate_activation': string(candidate_activation),
-            'param_attr': string(var_r0t),
-            'bias_attr': string(var_bh) if val_b else False,
-        }
-        node.fluid_code.add_layer(
-            'dynamic_gru',
-            inputs=var_fc + ',' + str(hidden_size),
-            output=var_y00,
-            param_attr=attr)
-
-        num_opt = len(node.layer.output)
-
-        if num_opt > 0 and node.layer.output[0] != '':
+                inputs=var_r_forward,
+                output=var_r_forward,
+                param_attr={'axes': [0]})
             node.fluid_code.add_layer(
-                'unsqueeze',
-                inputs=var_y00,
-                output=node.layer.output[0],
-                param_attr={
-                    'axes': [1, 1],
-                    'name': string(node.layer.output[0])
-                })
-        if num_opt > 1 and node.layer.output[1] != '':
+                'squeeze',
+                inputs=var_r_backward,
+                output=var_r_backward,
+                param_attr={'axes': [0]})
+            var_b_forward = node.layer_name + '_b_forward'
+            var_b_backward = node.layer_name + '_b_backward'
             node.fluid_code.add_layer(
-                'unsqueeze',
-                inputs=var_y00,
-                output=node.layer.output[1],
+                'split',
+                inputs=var_bh,
+                output=var_b_forward + ',' + var_b_backward,
                 param_attr={
-                    'axes': [1, 1],
-                    'name': string(node.layer.output[1])
+                    'dim': 0,
+                    'num_or_sections': [1, 1],
+                    'name': string(node.layer_name + '_ipt_split')
                 })
+            forward_attr = {
+                'origin_mode': True,
+                'is_reverse': False,
+                'gate_activation': string(gate_activation),
+                'candidate_activation': string(candidate_activation),
+                'param_attr': string(var_r_forward),
+                'bias_attr': string(var_b_forward) if val_b else False,
+            }
+            lod_attr = {
+                'target_lod': [x_shape[0] * i for i in range(x_shape[1] + 1)]
+            }
+            node.fluid_code.add_layer(
+                'lod_reset',
+                inputs=var_ipt_forward,
+                output=var_ipt_forward,
+                param_attr=lod_attr)
+            var_y_forward = node.layer_name + '_y_forward'
+            node.fluid_code.add_layer(
+                'dynamic_gru',
+                inputs=var_ipt_forward + ',' + str(hidden_size),
+                output=var_y_forward,
+                param_attr=forward_attr)
+            backward_attr = {
+                'origin_mode': True,
+                'is_reverse': True,
+                'gate_activation': string(gate_activation),
+                'candidate_activation': string(candidate_activation),
+                #'param_attr': string(var_r_backward),
+                'param_attr': string('1111'),
+                'bias_attr': string(var_b_backward) if val_b else False,
+            }
+            node.fluid_code.add_layer(
+                'lod_reset',
+                inputs=var_ipt_backward,
+                output=var_ipt_backward,
+                param_attr=lod_attr)
+            var_y_backward = node.layer_name + '_y_backward'
+            node.fluid_code.add_layer(
+                'dynamic_gru',
+                inputs=var_ipt_backward + ',' + str(hidden_size),
+                output=var_y_backward,
+                param_attr=backward_attr)
+            node.fluid_code.add_layer(
+                'reshape',
+                inputs=var_y_forward,
+                output=var_y_forward,
+                param_attr={'shape': [x_shape[0], 1, x_shape[1], hidden_size]})
+            node.fluid_code.add_layer(
+                'reshape',
+                inputs=var_y_backward,
+                output=var_y_backward,
+                param_attr={'shape': [x_shape[0], 1, x_shape[1], hidden_size]})
+            num_opt = len(node.layer.output)
+            if num_opt > 0 and node.layer.output[0] != '':
+                node.fluid_code.add_layer(
+                    'concat',
+                    inputs=[var_y_forward, var_y_backward],
+                    output=node.layer.output[0],
+                    param_attr={'axis': 1})
+            if num_opt > 1 and node.layer.output[1] != '':
+                var_gather_index = node.layer_name + '_gather_index'
+                node.fluid_code.add_layer(
+                    'fill_constant',
+                    inputs=None,
+                    output=var_gather_index,
+                    param_attr={
+                        'shape': [1],
+                        'dtype': string('int32'),
+                        'value': -1
+                    })
+                var_last_hidden_forward = node.layer_name + '_last_hidden_forward'
+                node.fluid_code.add_layer(
+                    'gather',
+                    inputs=var_y_forward,
+                    output=var_last_hidden_forward,
+                    param_attr={'index': var_gather_index})
+                var_last_hidden_backward = node.layer_name + '_last_hidden_backward'
+                node.fluid_code.add_layer(
+                    'gather',
+                    inputs=var_y_backward,
+                    output=var_last_hidden_backward,
+                    param_attr={'index': var_gather_index})
+                node.fluid_code.add_layer(
+                    'concat',
+                    inputs=[var_last_hidden_forward, var_last_hidden_backward],
+                    output=node.layer.output[1],
+                    param_attr={'axis': 1})
+                node.fluid_code.add_layer(
+                    'unsqueeze',
+                    inputs=node.layer.output[1],
+                    output=node.layer.output[1],
+                    param_attr={'axes': [0]})
+        else:
+            if val_xh:
+                var_xh0 = node.layer_name + '_xh0'
+                node.fluid_code.add_layer(
+                    'squeeze',
+                    inputs=val_xh,
+                    output=var_xh0,
+                    param_attr={'axes': [0],
+                                'name': string(var_xh0)})
+            var_r0 = node.layer_name + '_r0'
+            node.fluid_code.add_layer(
+                'squeeze',
+                inputs=val_r,
+                output=var_r0,
+                param_attr={'axes': [0],
+                            'name': string(var_r0)})
+            var_r0t = node.layer_name + '_r0t'
+            node.fluid_code.add_layer(
+                'transpose',
+                inputs=var_r0,
+                output=var_r0t,
+                param_attr={'perm': [1, 0],
+                            'name': string(var_r0t)})
+            var_y00 = node.layer_name + '_y00'
+            attr = {
+                'origin_mode': True,
+                'h_0': var_xh0 if val_xh else None,
+                'is_reverse': is_reverse,
+                'gate_activation': string(gate_activation),
+                'candidate_activation': string(candidate_activation),
+                'param_attr': string(var_r0t),
+                'bias_attr': string(var_bh) if val_b else False,
+            }
+            node.fluid_code.add_layer(
+                'dynamic_gru',
+                inputs=var_fc + ',' + str(hidden_size),
+                output=var_y00,
+                param_attr=attr)
+            num_opt = len(node.layer.output)
+            if num_opt > 0 and node.layer.output[0] != '':
+                node.fluid_code.add_layer(
+                    'reshape',
+                    inputs=var_y00,
+                    output=node.layer.output[0],
+                    param_attr={
+                        'shape': [x_shape[0], 1, x_shape[1], hidden_size],
+                        'name': string(node.layer.output[0])
+                    })
+            if num_opt > 1 and node.layer.output[1] != '':
+                var_gather_index = node.layer_name + '_gather_index'
+                node.fluid_code.add_layer(
+                    'fill_constant',
+                    inputs=None,
+                    output=var_gather_index,
+                    param_attr={
+                        'shape': [1],
+                        'dtype': string('int32'),
+                        'value': -1
+                    })
+                var_last_hidden_forward = node.layer_name + '_last_hidden_forward'
+                node.fluid_code.add_layer(
+                    'gather',
+                    inputs=node.layer.output[0],
+                    output=var_last_hidden_forward,
+                    param_attr={'index': var_gather_index})
+                node.fluid_code.add_layer(
+                    'unsqueeze',
+                    inputs=var_last_hidden_forward,
+                    output=node.layer.output[1],
+                    param_attr={'axes': [0]})
