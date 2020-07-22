@@ -1445,6 +1445,14 @@ class OpSet9():
                 'name': string(var_mm)
             })
 
+        # node.fluid_code.add_layer(
+        #     'reshape',
+        #     inputs=var_mm,
+        #     output=var_mm,
+        #     param_attr={
+        #         'shape': [x_shape[0] * x_shape[1], w_shape[1]],
+        #     })
+
         if val_b:
             var_bi = node.layer_name + '_bi'
             var_bh = node.layer_name + '_bh'
