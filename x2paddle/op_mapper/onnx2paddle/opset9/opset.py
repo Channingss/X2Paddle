@@ -1453,8 +1453,7 @@ class OpSet9():
                 output=var_bi + ',' + var_bh,
                 param_attr={
                     'dim': 1,
-                    'num_or_sections': [hidden_size * 3, hidden_size * 3],
-                    'name': string(node.layer_name + '.b/split')
+                    'num_or_sections': [hidden_size * 3, hidden_size * 3]
                 })
             var_bi0 = node.layer_name + '_bi0'
             if direction == 'bidirectional':
@@ -1469,10 +1468,10 @@ class OpSet9():
             else:
                 node.fluid_code.add_layer(
                     'reshape',
-                    inputs=val_b,
+                    inputs=var_bi,
                     output=var_bi0,
                     param_attr={
-                        'shape': [hidden_size * 6],
+                        'shape': [hidden_size * 3],
                         'name': string(var_bi0)
                     })
             node.fluid_code.add_layer(
@@ -1480,10 +1479,7 @@ class OpSet9():
                 inputs={'x': var_mm,
                         'y': var_bi0},
                 output=var_fc,
-                param_attr={
-                    'axis': 1,
-                    'name': string(node.layer_name + '.i/bias')
-                })
+                param_attr={'axis': 1})
         if direction == 'bidirectional':
             #split input for bidirection
             var_ipt_forward = node.layer_name + '_ipt_forward'
@@ -1667,13 +1663,12 @@ class OpSet9():
                     param_attr={'axes': [0]})
         else:
             if val_xh:
-                var_xh0 = node.layer_name + '_xh0'
+                var_xh = val_xh.layer_name + '_squeeze'
                 node.fluid_code.add_layer(
                     'squeeze',
                     inputs=val_xh,
-                    output=var_xh0,
-                    param_attr={'axes': [0],
-                                'name': string(var_xh0)})
+                    output=var_xh,
+                    param_attr={'axes': [0]})
             if val_b:
                 val_b_value = _const_weight_or_none(val_b)
                 var_bi_value, var_bh_value, _ = np.split(
@@ -1690,7 +1685,7 @@ class OpSet9():
             var_y = node.layer_name + '_dynamic_gru'
             attr = {
                 'origin_mode': True,
-                'h_0': var_xh0 if val_xh else None,
+                #'h_0': var_xh if val_xh else None,
                 'is_reverse': is_reverse,
                 'gate_activation': string(gate_activation),
                 'candidate_activation': string(candidate_activation),
