@@ -80,7 +80,7 @@ def arg_parser():
         "-oo",
         type=int,
         default=10,
-        help="when paddle2onnx set onnx opset version to export")
+        help="when use paddle2onnx, set onnx opset version to export")
     parser.add_argument(
         "--params_merge",
         "-pm",
