@@ -1776,12 +1776,12 @@ class OpSet9():
         x_shape = val_x.out_shapes[0]
 
         assert node.get_attr('clip', None) is None, 'clipping not supported'
-        assert node.get_attr('linear_before_reset',
-                             0) == 0, 'only linear_before_reset = 0 supported'
+        assert node.get_attr('input_forget',
+                             0) == 0, 'only input_forget = 0 supported'
         direction = node.get_attr('direction', 'forward')
-        activations = node.get_attr('activations', ['Sigmoid', 'Tanh'])
+        activations = node.get_attr('activations', ['Sigmoid', 'Tanh', 'Tanh'])
         activations = [s.lower() for s in activations]
-        gate_activation, candidate_activation = activations
+        gate_activation, cell_activation, candidate_activation = activations
         is_reverse = direction == 'reverse'
         w_shape = val_w.out_shapes[0]
         hidden_size = node.get_attr('hidden_size', None)
@@ -1813,7 +1813,7 @@ class OpSet9():
             'reshape',
             inputs=var_x0,
             output=var_x0,
-            param_attr={'shape': [x_shape[1] * x_shape[0], x_shape[2]], })
+            param_attr={'shape': [x_shape[1] * x_shape[0], x_shape[2]]})
         node.fluid_code.add_layer(
             'reshape',
             inputs=val_w,
@@ -1843,7 +1843,7 @@ class OpSet9():
                 output=var_bi + ',' + var_bh,
                 param_attr={
                     'dim': 1,
-                    'num_or_sections': [hidden_size * 3, hidden_size * 3]
+                    'num_or_sections': [hidden_size * 4, hidden_size * 4]
                 })
             var_bi0 = node.layer_name + '_bi0'
             if direction == 'bidirectional':
@@ -1852,7 +1852,7 @@ class OpSet9():
                     inputs=var_bi,
                     output=var_bi0,
                     param_attr={
-                        'shape': [hidden_size * 6],
+                        'shape': [hidden_size * 8],
                         'name': string(var_bi0)
                     })
             else:
@@ -1861,7 +1861,7 @@ class OpSet9():
                     inputs=var_bi,
                     output=var_bi0,
                     param_attr={
-                        'shape': [hidden_size * 3],
+                        'shape': [hidden_size * 4],
                         'name': string(var_bi0)
                     })
             node.fluid_code.add_layer(
@@ -1880,7 +1880,7 @@ class OpSet9():
                 output=var_ipt_forward + ',' + var_ipt_backward,
                 param_attr={
                     'dim': 1,
-                    'num_or_sections': [hidden_size * 3, hidden_size * 3]
+                    'num_or_sections': [hidden_size * 4, hidden_size * 4]
                 })
             #split recurrence weight tensor for bidirection
             var_r_forward = node.layer_name + '_r_forward'
@@ -1889,20 +1889,19 @@ class OpSet9():
             var_r_value_forward, var_r_value_backward, _ = np.split(
                 val_r_value, indices_or_sections=[1, 2], axis=0)
             var_r_value_forward = np.squeeze(var_r_value_forward, axis=0)
-            [r_z, r_r, r_h] = np.split(var_r_value_forward, 3)
+            [r_z, r_r, r_o, r_h] = np.split(var_r_value_forward, 4)
             var_r_value_forward = np.concatenate((
                 (np.transpose(np.concatenate((r_z, r_r))).flatten(),
-                 np.transpose(r_h).flatten()))).reshape(hidden_size,
-                                                        hidden_size * 3)
+                 np.transpose(np.concatenate((r_o, r_h))).flatten()))).reshape(
+                     hidden_size, hidden_size * 4)
             self.weights[var_r_forward] = var_r_value_forward
 
             var_r_value_backward = np.squeeze(var_r_value_backward, axis=0)
-            [r_z, r_r, r_h] = np.split(var_r_value_backward, 3)
+            [r_z, r_r, r_o, r_h] = np.split(var_r_value_backward, 4)
             var_r_value_backward = np.concatenate((
                 (np.transpose(np.concatenate((r_z, r_r))).flatten(),
-                 np.transpose(r_h).flatten()))).reshape(hidden_size,
-                                                        hidden_size * 3)
-            print(var_r_value_backward.shape)
+                 np.transpose(np.concatenate((r_o, r_h))).flatten()))).reshape(
+                     hidden_size, hidden_size * 4)
             self.weights[var_r_backward] = var_r_value_backward
             node.fluid_code.add_layer(
                 'split',
@@ -1927,7 +1926,7 @@ class OpSet9():
                 val_b_value = _const_weight_or_none(val_b)
                 var_bi_value, var_bh_value, _ = np.split(
                     val_b_value,
-                    indices_or_sections=[hidden_size * 3, 2 * hidden_size * 3],
+                    indices_or_sections=[hidden_size * 4, 2 * hidden_size * 4],
                     axis=1)
                 var_bh_value_forward, var_bh_value_backward, _ = np.split(
                     var_bh_value, indices_or_sections=[1, 2], axis=0)
@@ -1940,7 +1939,6 @@ class OpSet9():
                     param_attr={'dim': 0,
                                 'num_or_sections': [1, 1]})
             forward_attr = {
-                'origin_mode': True,
                 'is_reverse': False,
                 'gate_activation': string(gate_activation),
                 'candidate_activation': string(candidate_activation),
@@ -1962,7 +1960,6 @@ class OpSet9():
                 output=var_y_forward,
                 param_attr=forward_attr)
             backward_attr = {
-                'origin_mode': True,
                 'is_reverse': True,
                 'gate_activation': string(gate_activation),
                 'candidate_activation': string(candidate_activation),
@@ -2066,28 +2063,29 @@ class OpSet9():
                 val_b_value = _const_weight_or_none(val_b)
                 var_bi_value, var_bh_value, _ = np.split(
                     val_b_value,
-                    indices_or_sections=[hidden_size * 3, 2 * hidden_size * 3],
+                    indices_or_sections=[hidden_size * 4, 2 * hidden_size * 4],
                     axis=1)
                 self.weights[var_bh] = var_bh_value
             val_r_reshaped = val_r.layer_name + '_reshaped'
             val_r_value = _const_weight_or_none(val_r)
             val_r_value = np.squeeze(val_r_value, axis=0)
-            [r_z, r_r, r_h] = np.split(val_r_value, 3)
-            val_r_value = np.concatenate((
+            [r_z, r_r, r_o, r_h] = np.split(val_r_value, 4)
+            val_r_value = np.concatenate(
                 (np.transpose(np.concatenate((r_z, r_r))).flatten(),
-                 np.transpose(r_h).flatten()))).reshape(hidden_size,
-                                                        hidden_size * 3)
+                 np.transpose(np.concatenate((r_o, r_h))).flatten())).reshape(
+                     hidden_size, hidden_size * 4)
             self.omit_nodes.append(val_r.layer_name)
             self.weights[val_r_reshaped] = val_r_value
-            var_y = node.layer_name + '_dynamic_gru'
+            var_y = node.layer_name + '_dynamic_lstm'
+            var_cell = node.layer_name + '_dynamic_lstm_cell'
             attr = {
-                'origin_mode': True,
                 #'h_0': var_xh if val_xh else None,
                 'is_reverse': is_reverse,
                 'gate_activation': string(gate_activation),
                 'candidate_activation': string(candidate_activation),
                 'param_attr': string(val_r_reshaped),
                 'bias_attr': string(var_bh) if val_b else False,
+                'use_peepholes': False
             }
             lod_attr = {
                 'target_lod': [x_shape[0] * i for i in range(x_shape[1] + 1)]
@@ -2095,9 +2093,9 @@ class OpSet9():
             node.fluid_code.add_layer(
                 'lod_reset', inputs=var_fc, output=var_fc, param_attr=lod_attr)
             node.fluid_code.add_layer(
-                'dynamic_gru',
-                inputs=var_fc + ',' + str(hidden_size),
-                output=var_y,
+                'dynamic_lstm',
+                inputs=var_fc + ',' + str(hidden_size * 4),
+                output=var_y + ',' + var_cell,
                 param_attr=attr)
             node.fluid_code.add_layer(
                 'reshape',
@@ -2114,13 +2112,25 @@ class OpSet9():
                 inputs=var_y,
                 output=node.layer.output[0],
                 param_attr={'axes': [1]})
+
+            node.fluid_code.add_layer(
+                'reshape',
+                inputs=var_cell,
+                output=var_cell,
+                param_attr={'shape': [x_shape[1], x_shape[0], hidden_size]})
+            node.fluid_code.add_layer(
+                'transpose',
+                inputs=var_cell,
+                output=var_cell,
+                param_attr={'perm': [1, 0, 2]})
+
             num_opt = len(node.layer.output)
             if num_opt > 1 and node.layer.output[1] != '':
-                var_gather_index = node.layer_name + '_gather_index'
+                var_hidden_gather_index = node.layer_name + '_hidden_gather_index'
                 node.fluid_code.add_layer(
                     'fill_constant',
                     inputs=None,
-                    output=var_gather_index,
+                    output=var_hidden_gather_index,
                     param_attr={
                         'shape': [1],
                         'dtype': string('int32'),
@@ -2130,4 +2140,20 @@ class OpSet9():
                     'gather',
                     inputs=var_y,
                     output=node.layer.output[1],
-                    param_attr={'index': var_gather_index})
+                    param_attr={'index': var_hidden_gather_index})
+            if num_opt > 2 and node.layer.output[2] != '':
+                var_cell_gather_index = node.layer_name + '_cell_gather_index'
+                node.fluid_code.add_layer(
+                    'fill_constant',
+                    inputs=None,
+                    output=var_cell_gather_index,
+                    param_attr={
+                        'shape': [1],
+                        'dtype': string('int32'),
+                        'value': x_shape[0] - 1
+                    })
+                node.fluid_code.add_layer(
+                    'gather',
+                    inputs=var_cell,
+                    output=node.layer.output[2],
+                    param_attr={'index': var_cell_gather_index})
