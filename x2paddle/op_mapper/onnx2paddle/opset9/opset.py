@@ -17,6 +17,7 @@ from x2paddle.core.graph import GraphNode
 from x2paddle.core.fluid_code import Layer
 from x2paddle.core.fluid_code import FluidCode
 from x2paddle.core.util import string
+from x2paddle.op_mapper.onnx2paddle.opset9.custom_layer import *
 from functools import reduce
 import numpy as np
 import onnx
@@ -31,15 +32,18 @@ import shutil
 _logger = _logging.getLogger(__name__)
 
 
-def _const_weight_or_none(node):
+def _const_weight_or_none(node, necessary=False):
     if 'Constant' in node.layer_type:
         return node.value
     if isinstance(node, ONNXGraphDataNode):
         return node.weight
+    if necessary:
+        assert '{} should be an initializer or Constant operator.'.format(
+            node.layer_name)
     return None
 
 
-def get_same_padding(in_size, kernel_size, stride):
+def _get_same_padding(in_size, kernel_size, stride):
     new_size = int(math.ceil(in_size * 1.0 / stride))
     pad_size = (new_size - 1) * stride + kernel_size - in_size
     pad0 = int(pad_size / 2)
@@ -702,7 +706,7 @@ class OpSet9():
             ends = self.graph.get_input_node(node, idx=2, copy=True)
             if len(node.inputs) > 3:
                 axes = self.graph.get_input_node(node, idx=3, copy=True)
-                axes = _const_weight_or_none(axes)
+                axes = _const_weight_or_none(axes, necessaryed=True)
             if len(node.inputs) > 4:
                 steps = self.graph.get_input_node(node, idx=4, copy=True)
                 steps = _const_weight_or_none(steps)
@@ -713,8 +717,8 @@ class OpSet9():
                 "starts": starts.layer_name,
                 "ends": ends.layer_name
             }
-            starts_value = _const_weight_or_none(starts)
-            ends_value = _const_weight_or_none(ends)
+            starts_value = _const_weight_or_none(starts, necessaryed=True)
+            ends_value = _const_weight_or_none(ends, necessaryed=True)
             if starts_value is not None and ends_value is not None:
                 self.omit_nodes.append(starts.layer_name)
                 self.omit_nodes.append(ends.layer_name)
@@ -871,10 +875,10 @@ class OpSet9():
 
         if auto_pad == "SAME_UPPER" or auto_pad == "SAME_LOWER":
             input_shape = val_x.out_shapes[0]
-            pad_h = get_same_padding(input_shape[2], kernel_shape[0],
-                                     strides[0])
-            pad_w = get_same_padding(input_shape[3], kernel_shape[1],
-                                     strides[1])
+            pad_h = _get_same_padding(input_shape[2], kernel_shape[0],
+                                      strides[0])
+            pad_w = _get_same_padding(input_shape[3], kernel_shape[1],
+                                      strides[1])
             attr = {"paddings": pad_h + pad_w, "pad_value": 0.0}
 
         attr = {
@@ -1145,7 +1149,6 @@ class OpSet9():
     def NonZero(self, node):
         val_x = self.graph.get_input_node(node, idx=0, copy=True)
         val_x_dim = len(val_x.out_shapes[0])
-        print(val_x.layer_name, val_x.out_shapes[0])
         if val_x_dim == 1:
             node.fluid_code.add_layer("nonzero", inputs=val_x, output=val_x)
             node.fluid_code.add_layer(
@@ -1267,13 +1270,17 @@ class OpSet9():
         kernel_shape = node.get_attr('kernel_shape')
         convnd = len(kernel_shape)
         assert 2 <= convnd <= 3, 'only conv2d and conv3d is supported'
-        num_out_channels = val_w.out_shapes[0][0]  # OI...
+        num_out_channels = val_w.out_shapes[0][0]
         fluid_op = 'conv{}d'.format(convnd)
 
         num_groups = node.get_attr('group', 1)
-        strides = node.get_attr('strides', [1] * convnd)  # optional
-        dilations = node.get_attr('dilations', [1] * convnd)  # optional
-        pads = node.get_attr('pads', [0] * (convnd * 2))  # optional
+        strides = node.get_attr('strides', [1] * convnd)
+        dilations = node.get_attr('dilations', [1] * convnd)
+        assert dilations == [1] * convnd, 'only dilations == [1,1] supported,  \
+            if your model have Conv with dilations > 1, please create issue on \
+            https://github.com/PaddlePaddle/X2Paddle.'
+
+        pads = node.get_attr('pads', [0] * (convnd * 2))
 
         input_shape = val_x.out_shapes[0]
         paddings, val_x = self._pad_if_asymmetric(node, pads, val_x)
@@ -1283,7 +1290,7 @@ class OpSet9():
                                      strides[0])
             pad_w = get_same_padding(input_shape[3], kernel_shape[1],
                                      strides[1])
-            attr = {"paddings": pad_h + pad_w, "pad_value": 0.0}
+            paddings = pad_h + pad_w
 
         attr = {
             "num_filters": num_out_channels,
@@ -1359,10 +1366,10 @@ class OpSet9():
         val_x = self.graph.get_input_node(node, idx=0, copy=True)
         val_w = self.graph.get_input_node(node, idx=1, copy=True)
         val_r = self.graph.get_input_node(node, idx=2, copy=True)
-
         val_b = None
         val_len = None
         val_xh = None
+
         miss_arg_num = 0
         num_ipt = len(node.layer.input)
         if num_ipt > 3 and node.layer.input[3] != '':
@@ -1377,19 +1384,27 @@ class OpSet9():
         if num_ipt > 5 and node.layer.input[5] != '':
             val_xh = self.graph.get_input_node(
                 node, idx=5 - miss_arg_num, copy=True)
+            print(
+                'Warnning: we just support converting  ONNX:GRU to Paddle:dynamic_op with h_0=None, which may cause difference of calculation.'
+            )
+        assert node.get_attr('clip', None) is None, 'clip not supported'
+        assert node.get_attr('linear_before_reset',
+                             0) == 0, 'only linear_before_reset = 0 supported'
+        direction = node.get_attr('direction', 'forward')
+        activations = node.get_attr('activations', ['Sigmoid', 'Tanh'])
+        activations = [s.lower() for s in activations]
+        gate_activation, candidate_activation = activations
+        is_reverse = direction == 'reverse'
 
         x_shape = val_x.out_shapes[0]
-
-        assert x_shape[1] == 1, 'only X with batch_size = 1 supported'
-        assert node.get_attr('clip', None) is None, 'clipping not supported'
-
+        w_shape = val_w.out_shapes[0]
         hidden_size = node.get_attr('hidden_size', None)
         if hidden_size is None:
             r_shape = val_r.out_shapes[0]
             if r_shape:
                 hidden_size = r_shape[-1]
         if hidden_size is None:
-            w_shape = var_w.out_shapes[0]
+            w_shape = val_w.out_shapes[0]
             if w_shape:
                 hidden_size = w_shape[-2] // 3
         if hidden_size is None and val_b:
@@ -1401,64 +1416,41 @@ class OpSet9():
             if xh_shape:
                 hidden_size = xh_shape[-1]
 
-        direction = node.get_attr('direction', 'forward')
-        assert direction != 'bidirectional', 'direction = bidirectional not supported'
-
-        activations = node.get_attr('activations', ['Sigmoid', 'Tanh'])
-        assert len(activations) == 2, 'bidirectional operation not supported'
-
-        assert node.get_attr('linear_before_reset',
-                             0) == 0, 'only linear_before_reset = 0 supported'
-
-        activations = [s.lower() for s in activations]
-        gate_activation, candidate_activation = activations
-        is_reverse = direction == 'reverse'
-
         var_x0 = node.layer_name + '_x0'
-        node.fluid_code.add_layer(
-            'squeeze',
-            inputs=val_x,
-            output=var_x0,
-            param_attr={'axes': [1],
-                        'name': string(var_x0)})
-
         var_w0 = node.layer_name + '_w0'
-        node.fluid_code.add_layer(
-            'squeeze',
-            inputs=val_w,
-            output=var_w0,
-            param_attr={'axes': [0],
-                        'name': string(var_w0)})
-
-        var_fc = node.layer_name + '_fc'
-        var_mm = (node.layer_name + '_mm') if val_b else var_fc
-        node.fluid_code.add_layer(
-            'matmul',
-            inputs={'x': var_x0,
-                    'y': var_w0},
-            output=var_mm,
-            param_attr={
-                'transpose_x': 0,
-                'transpose_y': 1,
-                'name': string(var_mm)
-            })
-
-        var_r0 = node.layer_name + '_r0'
-        node.fluid_code.add_layer(
-            'squeeze',
-            inputs=val_r,
-            output=var_r0,
-            param_attr={'axes': [0],
-                        'name': string(var_r0)})
-
-        var_r0t = node.layer_name + '_r0t'
-
+        # transpose X to [bath_size, seq_len, input_size]
         node.fluid_code.add_layer(
             'transpose',
-            inputs=var_r0,
-            output=var_r0t,
-            param_attr={'perm': [1, 0],
-                        'name': string(var_r0t)})
+            inputs=val_x,
+            output=var_x0,
+            param_attr={'perm': [1, 0, 2]})
+        node.fluid_code.add_layer(
+            'reshape',
+            inputs=var_x0,
+            output=var_x0,
+            param_attr={'shape': [x_shape[1] * x_shape[0], x_shape[2]]})
+        # transpose W to [input_size, hidden_size]
+        node.fluid_code.add_layer(
+            'reshape',
+            inputs=val_w,
+            output=var_w0,
+            param_attr={
+                'shape': [w_shape[0] * w_shape[1], w_shape[2]],
+                'name': string(var_w0)
+            })
+        node.fluid_code.add_layer(
+            'transpose',
+            inputs=var_w0,
+            output=var_w0,
+            param_attr={'perm': [1, 0]})
+        var_fc = node.layer_name + '_fc'
+        var_mm = (node.layer_name + '_mm') if val_b else var_fc
+
+        #  calculate X*W + B
+        self.omit_nodes.append(val_w.layer_name)
+        node.fluid_code.add_layer(
+            'mul', inputs={'x': var_x0,
+                           'y': var_w0}, output=var_mm)
         if val_b:
             var_bi = node.layer_name + '_bi'
             var_bh = node.layer_name + '_bh'
@@ -1467,69 +1459,290 @@ class OpSet9():
                 inputs=val_b,
                 output=var_bi + ',' + var_bh,
                 param_attr={
-                    'axis': 1,
-                    'split': [hidden_size * 3, hidden_size * 3],
-                    'name': string(node.layer_name + '.b/split')
+                    'dim': 1,
+                    'num_or_sections': [hidden_size * 3, hidden_size * 3]
                 })
             var_bi0 = node.layer_name + '_bi0'
+            if direction == 'bidirectional':
+                node.fluid_code.add_layer(
+                    'reshape',
+                    inputs=var_bi,
+                    output=var_bi0,
+                    param_attr={
+                        'shape': [hidden_size * 6],
+                        'name': string(var_bi0)
+                    })
+            else:
+                node.fluid_code.add_layer(
+                    'reshape',
+                    inputs=var_bi,
+                    output=var_bi0,
+                    param_attr={
+                        'shape': [hidden_size * 3],
+                        'name': string(var_bi0)
+                    })
             node.fluid_code.add_layer(
-                'squeeze',
-                inputs=var_bi,
-                output=var_bi0,
-                param_attr={'axes': [0],
-                            'name': string(var_bi0)})
-
-            node.fluid_code.add_layer(
-                'elmentwise_add',
-                inputs=[var_mm, var_bi0],
+                'elementwise_add',
+                inputs={'x': var_mm,
+                        'y': var_bi0},
                 output=var_fc,
+                param_attr={'axis': 1})
+        if direction == 'bidirectional':
+            #split input for bidirection
+            var_ipt_forward = node.layer_name + '_ipt_forward'
+            var_ipt_backward = node.layer_name + '_ipt_backward'
+            node.fluid_code.add_layer(
+                'split',
+                inputs=var_fc,
+                output=var_ipt_forward + ',' + var_ipt_backward,
                 param_attr={
-                    'axes': 1,
-                    'name': string(node.layer_name + '.i/bias')
+                    'dim': 1,
+                    'num_or_sections': [hidden_size * 3, hidden_size * 3]
                 })
+            #split recurrence weight tensor for bidirection
+            var_r_forward = node.layer_name + '_r_forward'
+            var_r_backward = node.layer_name + '_r_backward'
+            val_r_value = _const_weight_or_none(val_r, necessary=True)
+            var_r_value_forward, var_r_value_backward, _ = np.split(
+                val_r_value, indices_or_sections=[1, 2], axis=0)
+            var_r_value_forward = np.squeeze(var_r_value_forward, axis=0)
+            [r_z, r_r, r_h] = np.split(var_r_value_forward, 3)
+            var_r_value_forward = np.concatenate((
+                (np.transpose(np.concatenate((r_z, r_r))).flatten(),
+                 np.transpose(r_h).flatten()))).reshape(hidden_size,
+                                                        hidden_size * 3)
+            self.weights[var_r_forward] = var_r_value_forward
 
-        if val_xh:
-            var_xh0 = node.layer_name + '_xh0'
+            var_r_value_backward = np.squeeze(var_r_value_backward, axis=0)
+            [r_z, r_r, r_h] = np.split(var_r_value_backward, 3)
+            var_r_value_backward = np.concatenate((
+                (np.transpose(np.concatenate((r_z, r_r))).flatten(),
+                 np.transpose(r_h).flatten()))).reshape(hidden_size,
+                                                        hidden_size * 3)
+            self.weights[var_r_backward] = var_r_value_backward
+            node.fluid_code.add_layer(
+                'split',
+                inputs=val_r,
+                output=var_r_forward + ',' + var_r_backward,
+                param_attr={'dim': 0,
+                            'num_or_sections': [1, 1]})
             node.fluid_code.add_layer(
                 'squeeze',
-                inputs=val_xh,
-                output=var_xh0,
-                param_attr={'axes': [1],
-                            'name': string(var_xh0)})
-        var_y00 = node.layer_name + '_y00'
-
-        attr = {
-            'origin_mode': True,
-            'h_0': var_xh0 if val_xh else None,
-            'is_reverse': is_reverse,
-            'gate_activation': string(gate_activation),
-            'candidate_activation': string(candidate_activation),
-            'param_attr': string(var_r0t),
-            'bias_attr': string(var_bh) if val_b else False,
-        }
-        node.fluid_code.add_layer(
-            'dynamic_gru',
-            inputs=var_fc + ',' + str(hidden_size),
-            output=var_y00,
-            param_attr=attr)
-
-        num_opt = len(node.layer.output)
-
-        if num_opt > 0 and node.layer.output[0] != '':
+                inputs=var_r_forward,
+                output=var_r_forward,
+                param_attr={'axes': [0]})
             node.fluid_code.add_layer(
-                'unsqueeze',
-                inputs=var_y00,
+                'squeeze',
+                inputs=var_r_backward,
+                output=var_r_backward,
+                param_attr={'axes': [0]})
+            if val_b:
+                var_b_forward = node.layer_name + '_b_forward'
+                var_b_backward = node.layer_name + '_b_backward'
+                #split bias tensor of gates for bidirection
+                val_b_value = _const_weight_or_none(val_b, necessary=True)
+                var_bi_value, var_bh_value, _ = np.split(
+                    val_b_value,
+                    indices_or_sections=[hidden_size * 3, 2 * hidden_size * 3],
+                    axis=1)
+                var_bh_value_forward, var_bh_value_backward, _ = np.split(
+                    var_bh_value, indices_or_sections=[1, 2], axis=0)
+                self.weights[var_b_forward] = var_bh_value_forward
+                self.weights[var_b_backward] = var_bh_value_backward
+                node.fluid_code.add_layer(
+                    'split',
+                    inputs=var_bh,
+                    output=var_b_forward + ',' + var_b_backward,
+                    param_attr={'dim': 0,
+                                'num_or_sections': [1, 1]})
+            forward_attr = {
+                'origin_mode': True,
+                'is_reverse': False,
+                'gate_activation': string(gate_activation),
+                'candidate_activation': string(candidate_activation),
+                'param_attr': string(var_r_forward),
+                'bias_attr': string(var_b_forward) if val_b else False,
+            }
+            lod_attr = {
+                'target_lod': [x_shape[0] * i for i in range(x_shape[1] + 1)]
+            }
+            node.fluid_code.add_layer(
+                'lod_reset',
+                inputs=var_ipt_forward,
+                output=var_ipt_forward,
+                param_attr=lod_attr)
+            var_y_forward = node.layer_name + '_y_forward'
+            node.fluid_code.add_layer(
+                'dynamic_gru',
+                inputs=var_ipt_forward + ',' + str(hidden_size),
+                output=var_y_forward,
+                param_attr=forward_attr)
+            backward_attr = {
+                'origin_mode': True,
+                'is_reverse': True,
+                'gate_activation': string(gate_activation),
+                'candidate_activation': string(candidate_activation),
+                'param_attr': string(var_r_backward),
+                'bias_attr': string(var_b_backward) if val_b else False,
+            }
+            node.fluid_code.add_layer(
+                'lod_reset',
+                inputs=var_ipt_backward,
+                output=var_ipt_backward,
+                param_attr=lod_attr)
+            var_y_backward = node.layer_name + '_y_backward'
+            node.fluid_code.add_layer(
+                'dynamic_gru',
+                inputs=var_ipt_backward + ',' + str(hidden_size),
+                output=var_y_backward,
+                param_attr=backward_attr)
+            node.fluid_code.add_layer(
+                'reshape',
+                inputs=var_y_forward,
+                output=var_y_forward,
+                param_attr={'shape': [x_shape[1], 1, x_shape[0], hidden_size]})
+            node.fluid_code.add_layer(
+                'reshape',
+                inputs=var_y_backward,
+                output=var_y_backward,
+                param_attr={'shape': [x_shape[1], 1, x_shape[0], hidden_size]})
+            var_y = node.layer_name + '_dynamic_gru'
+            node.fluid_code.add_layer(
+                'concat',
+                inputs=[var_y_forward, var_y_backward],
+                output=var_y,
+                param_attr={'axis': 1})
+            node.fluid_code.add_layer(
+                'transpose',
+                inputs=var_y,
                 output=node.layer.output[0],
-                param_attr={
-                    'axes': [1, 1],
-                    'name': string(node.layer.output[0])
-                })
-        if num_opt > 1 and node.layer.output[1] != '':
+                param_attr={'perm': [2, 1, 0, 3]})
+            if len(node.layer.output) > 1 and node.layer.output[1] != '':
+                node.fluid_code.add_layer(
+                    'transpose',
+                    inputs=var_y_forward,
+                    output=var_y_forward,
+                    param_attr={'perm': [2, 1, 0, 3]})
+                node.fluid_code.add_layer(
+                    'transpose',
+                    inputs=var_y_backward,
+                    output=var_y_backward,
+                    param_attr={'perm': [2, 1, 0, 3]})
+                var_gather_index_forward = node.layer_name + '_gather_index_forward'
+                node.fluid_code.add_layer(
+                    'fill_constant',
+                    inputs=None,
+                    output=var_gather_index_forward,
+                    param_attr={
+                        'shape': [1],
+                        'dtype': string('int32'),
+                        'value': x_shape[0] - 1
+                    })
+                var_gather_index_backward = node.layer_name + '_gather_index_backward'
+                node.fluid_code.add_layer(
+                    'fill_constant',
+                    inputs=None,
+                    output=var_gather_index_backward,
+                    param_attr={
+                        'shape': [1],
+                        'dtype': string('int32'),
+                        'value': 0
+                    })
+                var_last_hidden_forward = node.layer_name + '_last_hidden_forward'
+                node.fluid_code.add_layer(
+                    'gather',
+                    inputs=var_y_forward,
+                    output=var_last_hidden_forward,
+                    param_attr={'index': var_gather_index_forward})
+                var_last_hidden_backward = node.layer_name + '_last_hidden_backward'
+                node.fluid_code.add_layer(
+                    'gather',
+                    inputs=var_y_backward,
+                    output=var_last_hidden_backward,
+                    param_attr={'index': var_gather_index_backward})
+                node.fluid_code.add_layer(
+                    'concat',
+                    inputs=[var_last_hidden_forward, var_last_hidden_backward],
+                    output=node.layer.output[1],
+                    param_attr={'axis': 1})
+                node.fluid_code.add_layer(
+                    'squeeze',
+                    inputs=node.layer.output[1],
+                    output=node.layer.output[1],
+                    param_attr={'axes': [0]})
+        else:
+            if val_xh:
+                var_xh = val_xh.layer_name + '_squeeze'
+                node.fluid_code.add_layer(
+                    'squeeze',
+                    inputs=val_xh,
+                    output=var_xh,
+                    param_attr={'axes': [0]})
+            if val_b:
+                val_b_value = _const_weight_or_none(val_b, necessary=True)
+                var_bi_value, var_bh_value, _ = np.split(
+                    val_b_value,
+                    indices_or_sections=[hidden_size * 3, 2 * hidden_size * 3],
+                    axis=1)
+                self.weights[var_bh] = var_bh_value
+            val_r_reshaped = val_r.layer_name + '_reshaped'
+            val_r_value = _const_weight_or_none(val_r, necessaryed=True)
+            val_r_value = np.squeeze(val_r_value, axis=0)
+            [r_z, r_r, r_h] = np.split(val_r_value, 3)
+            val_r_value = np.concatenate((
+                (np.transpose(np.concatenate((r_z, r_r))).flatten(),
+                 np.transpose(r_h).flatten()))).reshape(hidden_size,
+                                                        hidden_size * 3)
+            self.omit_nodes.append(val_r.layer_name)
+            self.weights[val_r_reshaped] = val_r_value
+            var_y = node.layer_name + '_dynamic_gru'
+            attr = {
+                'origin_mode': True,
+                'is_reverse': is_reverse,
+                'gate_activation': string(gate_activation),
+                'candidate_activation': string(candidate_activation),
+                'param_attr': string(val_r_reshaped),
+                'bias_attr': string(var_bh) if val_b else False,
+            }
+            lod_attr = {
+                'target_lod': [x_shape[0] * i for i in range(x_shape[1] + 1)]
+            }
+            node.fluid_code.add_layer(
+                'lod_reset', inputs=var_fc, output=var_fc, param_attr=lod_attr)
+            node.fluid_code.add_layer(
+                'dynamic_gru',
+                inputs=var_fc + ',' + str(hidden_size),
+                output=var_y,
+                param_attr=attr)
+            node.fluid_code.add_layer(
+                'reshape',
+                inputs=var_y,
+                output=var_y,
+                param_attr={'shape': [x_shape[1], x_shape[0], hidden_size]})
+            node.fluid_code.add_layer(
+                'transpose',
+                inputs=var_y,
+                output=var_y,
+                param_attr={'perm': [1, 0, 2]})
             node.fluid_code.add_layer(
                 'unsqueeze',
-                inputs=var_y00,
-                output=node.layer.output[1],
-                param_attr={
-                    'axes': [1, 1],
-                    'name': string(node.layer.output[1])
-                })
+                inputs=var_y,
+                output=node.layer.output[0],
+                param_attr={'axes': [1]})
+            num_opt = len(node.layer.output)
+            if num_opt > 1 and node.layer.output[1] != '':
+                var_gather_index = node.layer_name + '_gather_index'
+                node.fluid_code.add_layer(
+                    'fill_constant',
+                    inputs=None,
+                    output=var_gather_index,
+                    param_attr={
+                        'shape': [1],
+                        'dtype': string('int32'),
+                        'value': x_shape[0] - 1
+                    })
+                node.fluid_code.add_layer(
+                    'gather',
+                    inputs=var_y,
+                    output=node.layer.output[1],
+                    param_attr={'index': var_gather_index})
