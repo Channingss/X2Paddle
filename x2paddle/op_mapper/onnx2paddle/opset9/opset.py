@@ -335,10 +335,37 @@ class OpSet9():
 
     def _interpolate(self, node):
         val_x = self.graph.get_input_node(node, idx=0, copy=True)
+        inputs = {'input': val_x}
         if node.layer_type == 'Resize':
-            val_scales = self.graph.get_input_node(node, idx=2, copy=True)
+            if len(node.layer.input) == 2:
+                # opset 10
+                val_scales = self.graph.get_input_node(node, idx=1, copy=True)
+                inputs['scale'] = val_scales
+            elif len(node.layer.input) == 3:
+                # opset 11
+                val_scales = self.graph.get_input_node(node, idx=2, copy=True)
+                inputs['scale'] = val_scales
+            elif len(node.layer.input) == 4:
+                # opset 11
+                val_sizes = self.graph.get_input_node(node, idx=3, copy=True)
+                var_nc, var_hw = val_sizes.layer_name + '_nc', val_sizes.layer_name + '_hw'
+                node.fluid_code.add_layer(
+                    'split',
+                    inputs=val_sizes,
+                    output=var_nc + ',' + var_hw,
+                    param_attr={
+                        'dim': 0,
+                        'num_or_sections': [2, 2],
+                    })
+                node.fluid_code.add_layer(
+                    "cast",
+                    inputs=var_hw,
+                    output=var_hw,
+                    param_attr={'dtype': string('int32')})
+                inputs['out_shape'] = var_hw
         elif node.layer_type == 'Upsample':
             val_scales = self.graph.get_input_node(node, idx=1, copy=True)
+            inputs['scale'] = val_scales
 
         attr = {'name': string(node.layer_name)}
         mode = node.get_attr('mode', 'nearest')
@@ -348,13 +375,8 @@ class OpSet9():
                 'Warnning: paddle not support op:resize wiht mode: linear, we use bilinear replace linear'
             )
             fluid_op = 'resize_bilinear'
-
         node.fluid_code.add_layer(
-            fluid_op,
-            inputs={'input': val_x,
-                    'scale': val_scales},
-            output=node,
-            param_attr=attr)
+            fluid_op, inputs=inputs, output=node, param_attr=attr)
 
     @print_mapping_info
     def RoiAlign(self, node):
@@ -500,7 +522,6 @@ class OpSet9():
                             'attribute "shape" of %s not inferred, '
                             'using value as 1-D tensor may lead to fails',
                             val_output.layer_name, val_output.layer_name)
-
         if len(value) == 1:
             value = value.tolist()
             shape = [1]
@@ -817,11 +838,13 @@ class OpSet9():
                 inputs=val_shape,
                 output=val_shape_cast,
                 param_attr={'dtype': string('int32')})
-            node.fluid_code.add_layer(
-                'reshape',
-                inputs=val_shape_cast,
-                output=val_shape_cast,
-                param_attr={'shape': val_shape.out_shapes[0]})
+            # shape may be [], come form Gather by scalar indices
+            if len(val_shape.out_shapes[0]) > 0:
+                node.fluid_code.add_layer(
+                    'reshape',
+                    inputs=val_shape_cast,
+                    output=val_shape_cast,
+                    param_attr={'shape': val_shape.out_shapes[0]})
             node.fluid_code.add_layer(
                 'reshape',
                 inputs={'x': val_x,
@@ -829,11 +852,13 @@ class OpSet9():
                 output=node,
                 param_attr=attr)
         else:
-            node.fluid_code.add_layer(
-                'reshape',
-                inputs=val_shape,
-                output=val_shape,
-                param_attr={'shape': val_shape.out_shapes[0]})
+            # shape may be [], come form Gather by scalar indices
+            if len(val_shape.out_shapes[0]) > 0:
+                node.fluid_code.add_layer(
+                    'reshape',
+                    inputs=val_shape,
+                    output=val_shape,
+                    param_attr={'shape': val_shape.out_shapes[0]})
             node.fluid_code.add_layer(
                 'reshape',
                 inputs={'x': val_x,
@@ -879,7 +904,7 @@ class OpSet9():
                                       strides[0])
             pad_w = _get_same_padding(input_shape[3], kernel_shape[1],
                                       strides[1])
-            attr = {"paddings": pad_h + pad_w, "pad_value": 0.0}
+            paddings = pad_h + pad_w
 
         attr = {
             "pool_size": kernel_shape,
@@ -1209,11 +1234,11 @@ class OpSet9():
 
         if auto_pad == "SAME_UPPER" or auto_pad == "SAME_LOWER":
             input_shape = val_x.out_shapes[0]
-            pad_h = get_same_padding(input_shape[2], kernel_shape[0],
-                                     strides[0])
-            pad_w = get_same_padding(input_shape[3], kernel_shape[1],
-                                     strides[1])
-            attr = {"paddings": pad_h + pad_w, "pad_value": 0.0}
+            pad_h = _get_same_padding(input_shape[2], kernel_shape[0],
+                                      strides[0])
+            pad_w = _get_same_padding(input_shape[3], kernel_shape[1],
+                                      strides[1])
+            paddings = pad_h + pad_w
 
         attr = {
             "pool_size": kernel_shape,
@@ -1286,10 +1311,10 @@ class OpSet9():
         paddings, val_x = self._pad_if_asymmetric(node, pads, val_x)
 
         if auto_pad == "SAME_UPPER" or auto_pad == "SAME_LOWER":
-            pad_h = get_same_padding(input_shape[2], kernel_shape[0],
-                                     strides[0])
-            pad_w = get_same_padding(input_shape[3], kernel_shape[1],
-                                     strides[1])
+            pad_h = _get_same_padding(input_shape[2], kernel_shape[0],
+                                      strides[0])
+            pad_w = _get_same_padding(input_shape[3], kernel_shape[1],
+                                      strides[1])
             paddings = pad_h + pad_w
 
         attr = {
