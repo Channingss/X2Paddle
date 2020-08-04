@@ -40,7 +40,7 @@ def _const_weight_or_none(node):
     return None
 
 
-def get_same_padding(in_size, kernel_size, stride):
+def _get_same_padding(in_size, kernel_size, stride):
     new_size = int(math.ceil(in_size * 1.0 / stride))
     pad_size = (new_size - 1) * stride + kernel_size - in_size
     pad0 = int(pad_size / 2)
@@ -872,10 +872,10 @@ class OpSet9():
 
         if auto_pad == "SAME_UPPER" or auto_pad == "SAME_LOWER":
             input_shape = val_x.out_shapes[0]
-            pad_h = get_same_padding(input_shape[2], kernel_shape[0],
-                                     strides[0])
-            pad_w = get_same_padding(input_shape[3], kernel_shape[1],
-                                     strides[1])
+            pad_h = _get_same_padding(input_shape[2], kernel_shape[0],
+                                      strides[0])
+            pad_w = _get_same_padding(input_shape[3], kernel_shape[1],
+                                      strides[1])
             attr = {"paddings": pad_h + pad_w, "pad_value": 0.0}
 
         attr = {
@@ -1267,13 +1267,17 @@ class OpSet9():
         kernel_shape = node.get_attr('kernel_shape')
         convnd = len(kernel_shape)
         assert 2 <= convnd <= 3, 'only conv2d and conv3d is supported'
-        num_out_channels = val_w.out_shapes[0][0]  # OI...
+        num_out_channels = val_w.out_shapes[0][0]
         fluid_op = 'conv{}d'.format(convnd)
 
         num_groups = node.get_attr('group', 1)
-        strides = node.get_attr('strides', [1] * convnd)  # optional
-        dilations = node.get_attr('dilations', [1] * convnd)  # optional
-        pads = node.get_attr('pads', [0] * (convnd * 2))  # optional
+        strides = node.get_attr('strides', [1] * convnd)
+        dilations = node.get_attr('dilations', [1] * convnd)
+        assert dilations == [1] * convnd, 'only dilations == [1,1] supported,  \
+            if your model have Conv with dilations > 1, please create issue on \
+            https://github.com/PaddlePaddle/X2Paddle.'
+
+        pads = node.get_attr('pads', [0] * (convnd * 2))
 
         input_shape = val_x.out_shapes[0]
         paddings, val_x = self._pad_if_asymmetric(node, pads, val_x)
@@ -1283,7 +1287,7 @@ class OpSet9():
                                      strides[0])
             pad_w = get_same_padding(input_shape[3], kernel_shape[1],
                                      strides[1])
-            attr = {"paddings": pad_h + pad_w, "pad_value": 0.0}
+            paddings = pad_h + pad_w
 
         attr = {
             "num_filters": num_out_channels,
@@ -1379,7 +1383,6 @@ class OpSet9():
                 node, idx=5 - miss_arg_num, copy=True)
 
         x_shape = val_x.out_shapes[0]
-
         assert node.get_attr('clip', None) is None, 'clipping not supported'
         assert node.get_attr('linear_before_reset',
                              0) == 0, 'only linear_before_reset = 0 supported'
@@ -1418,7 +1421,7 @@ class OpSet9():
             'reshape',
             inputs=var_x0,
             output=var_x0,
-            param_attr={'shape': [x_shape[1] * x_shape[0], x_shape[2]], })
+            param_attr={'shape': [x_shape[1] * x_shape[0], x_shape[2]]})
         node.fluid_code.add_layer(
             'reshape',
             inputs=val_w,
@@ -1774,7 +1777,6 @@ class OpSet9():
             miss_arg_num += 1
 
         x_shape = val_x.out_shapes[0]
-
         assert node.get_attr('clip', None) is None, 'clipping not supported'
         assert node.get_attr('input_forget',
                              0) == 0, 'only input_forget = 0 supported'
@@ -1792,18 +1794,18 @@ class OpSet9():
         if hidden_size is None:
             w_shape = val_w.out_shapes[0]
             if w_shape:
-                hidden_size = w_shape[-2] // 3
+                hidden_size = w_shape[-2] // 4
         if hidden_size is None and val_b:
             b_shape = val_b.out_shapes[0]
             if b_shape:
-                hidden_size = b_shape[-1] // 6
+                hidden_size = b_shape[-1] // 8
         if hidden_size is None and val_xh:
             xh_shape = val_xh.out_shapes[0]
             if xh_shape:
                 hidden_size = xh_shape[-1]
 
-        var_x0 = node.layer_name + '_x0'
-        var_w0 = node.layer_name + '_w0'
+        var_x0 = node.layer_name + '_x_reshape'
+        var_w0 = node.layer_name + '_w_reshape'
         node.fluid_code.add_layer(
             'transpose',
             inputs=val_x,
@@ -1819,7 +1821,8 @@ class OpSet9():
             inputs=val_w,
             output=var_w0,
             param_attr={
-                'shape': [w_shape[0] * w_shape[1], w_shape[2]],
+                'shape': [w_shape[1] * w_shape[0], w_shape[2]],
+                #'shape': [w_shape[2], w_shape[1] * w_shape[0]],
                 'name': string(var_w0)
             })
         node.fluid_code.add_layer(
@@ -1941,6 +1944,7 @@ class OpSet9():
             forward_attr = {
                 'is_reverse': False,
                 'gate_activation': string(gate_activation),
+                'cell_activation': string(cell_activation),
                 'candidate_activation': string(candidate_activation),
                 'param_attr': string(var_r_forward),
                 'bias_attr': string(var_b_forward) if val_b else False,
@@ -1962,6 +1966,7 @@ class OpSet9():
             backward_attr = {
                 'is_reverse': True,
                 'gate_activation': string(gate_activation),
+                'cell_activation': string(cell_activation),
                 'candidate_activation': string(candidate_activation),
                 'param_attr': string(var_r_backward),
                 'bias_attr': string(var_b_backward) if val_b else False,
@@ -2069,11 +2074,15 @@ class OpSet9():
             val_r_reshaped = val_r.layer_name + '_reshaped'
             val_r_value = _const_weight_or_none(val_r)
             val_r_value = np.squeeze(val_r_value, axis=0)
-            [r_z, r_r, r_o, r_h] = np.split(val_r_value, 4)
-            val_r_value = np.concatenate(
-                (np.transpose(np.concatenate((r_z, r_r))).flatten(),
-                 np.transpose(np.concatenate((r_o, r_h))).flatten())).reshape(
-                     hidden_size, hidden_size * 4)
+            #val_r_value = np.transpose(val_r_value, axes=[1,0])
+            val_r_value = np.reshape(
+                val_r_value, [val_r_value.shape[1], val_r_value.shape[0]],
+                order='A')
+            #[r_z, r_r, r_o, r_h] = np.split(val_r_value, 4)
+            #val_r_value = np.concatenate(
+            #    (np.transpose(np.concatenate((r_z, r_r))).flatten(),
+            #     np.transpose(np.concatenate((r_o, r_h))).flatten())).reshape(
+            #         hidden_size, hidden_size * 4)
             self.omit_nodes.append(val_r.layer_name)
             self.weights[val_r_reshaped] = val_r_value
             var_y = node.layer_name + '_dynamic_lstm'
@@ -2082,6 +2091,7 @@ class OpSet9():
                 #'h_0': var_xh if val_xh else None,
                 'is_reverse': is_reverse,
                 'gate_activation': string(gate_activation),
+                'cell_activation': string(cell_activation),
                 'candidate_activation': string(candidate_activation),
                 'param_attr': string(val_r_reshaped),
                 'bias_attr': string(var_bh) if val_b else False,
