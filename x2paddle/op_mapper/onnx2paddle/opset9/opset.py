@@ -144,6 +144,7 @@ class OpSet9():
     def __init__(self, decoder):
         super(OpSet9, self).__init__()
         self.graph = decoder.graph
+        self.custom_layers = custom_layers
         self.input_shapes = []
         self.weights = dict()
         self.omit_nodes = list()

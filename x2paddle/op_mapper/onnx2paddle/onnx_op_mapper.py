@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from x2paddle.op_mapper.onnx2paddle.opset9 import OpSet9, custom_layers
+from x2paddle.op_mapper.onnx2paddle import OpSet9
+from x2paddle.op_mapper.onnx2paddle import OpSet10
+from x2paddle.op_mapper.onnx2paddle import OpSet11
 from x2paddle.core.op_mapper import OpMapper
 from x2paddle.decoder.onnx_decoder import ONNXGraph, ONNXGraphNode, ONNXGraphDataNode
 
@@ -20,7 +22,7 @@ from x2paddle.decoder.onnx_decoder import ONNXGraph, ONNXGraphNode, ONNXGraphDat
 class ONNXOpMapper(OpMapper):
     def __init__(self, decoder):
         super(ONNXOpMapper, self).__init__()
-        self.support_op_sets = [9, ]
+        self.support_op_sets = [9, 10, 11]
         self.default_op_set = 9
         self.graph = decoder.graph
         self.opset = self.create_opset(decoder)
@@ -42,7 +44,7 @@ class ONNXOpMapper(OpMapper):
                 func(node)
             elif op in self.opset.default_op_mapping:
                 self.opset.directly_map(node)
-            elif op in custom_layers:
+            elif op in self.opset.custom_layers:
                 self.opset.deal_custom_layer(node)
             elif op in self.opset.elementwise_ops:
                 self.opset.elementwise_map(node)
@@ -58,7 +60,7 @@ class ONNXOpMapper(OpMapper):
             op = node.layer_type
             if not hasattr(self.opset, op) and \
                 op not in self.opset.default_op_mapping and \
-                op not in custom_layers and \
+                op not in self.opset.custom_layers and \
                 op not in self.opset.elementwise_ops:
                 unsupported_ops.add(op)
         if len(unsupported_ops) == 0:
@@ -86,6 +88,6 @@ class ONNXOpMapper(OpMapper):
             opset = 'OpSet' + str(run_op_set)
         print(
             'Now, onnx2paddle support convert onnx model opset_verison {},'
-            'opset_verison of your onnx model is {}, automatically treated as op_set: {}.'
-            .format(self.support_op_sets, decoder.op_set, run_op_set))
+            'opset_verison of your onnx model is {}, automatically treated as: {}.'
+            .format(self.support_op_sets, decoder.op_set, opset))
         return eval(opset)(decoder)
