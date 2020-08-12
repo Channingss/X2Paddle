@@ -19,7 +19,7 @@ import numpy as np
 import paddle.fluid.core as core
 import paddle.fluid as fluid
 import onnx
-import logging
+import warnings
 from onnx import helper, onnx_pb
 
 
@@ -42,9 +42,9 @@ def multiclass_nms(op, block):
     background = attrs['background_label']
     normalized = attrs['normalized']
     if normalized == False:
-        logging.warn(
-                    "The parameter normalized of multiclass_nms OP of Paddle is False, which has diff with ONNX." \
-                    " Please set normalized=True in multiclass_nms of Paddle, see doc Q4 in https://github.com/PaddlePaddle/X2Paddle/blob/develop/FAQ.md")
+        warnings.warn(
+            'The parameter normalized of multiclass_nms OP of Paddle is False, which has diff with ONNX. \
+                         Please set normalized=True in multiclass_nms of Paddle')
 
     #convert the paddle attribute to onnx tensor
     name_score_threshold = [outputs['Out'][0] + "@score_threshold"]
@@ -127,81 +127,36 @@ def multiclass_nms(op, block):
 
     # In this code block, we will deocde the raw score data, reshape N * C * M to 1 * N*C*M
     # and the same time, decode the select indices to 1 * D, gather the select_indices
-    outputs_gather_1 = [result_name + "@gather_1"]
-    node_gather_1 = onnx.helper.make_node(
+    outputs_gather_1_ = [result_name + "@gather_1_"]
+    node_gather_1_ = onnx.helper.make_node(
         'Gather',
         inputs=name_select_nms + [result_name + "@const_1"],
-        outputs=outputs_gather_1,
+        outputs=outputs_gather_1_,
         axis=1)
+    node_list.append(node_gather_1_)
+    outputs_gather_1 = [result_name + "@gather_1"]
+    node_gather_1 = onnx.helper.make_node(
+        'Unsqueeze',
+        inputs=outputs_gather_1_,
+        outputs=outputs_gather_1,
+        axes=[0])
     node_list.append(node_gather_1)
 
-    outputs_squeeze_gather_1 = [result_name + "@sequeeze_gather_1"]
-    node_squeeze_gather_1 = onnx.helper.make_node(
-        'Squeeze',
-        inputs=outputs_gather_1,
-        outputs=outputs_squeeze_gather_1,
-        axes=[1])
-    node_list.append(node_squeeze_gather_1)
+    outputs_gather_2_ = [result_name + "@gather_2_"]
+    node_gather_2_ = onnx.helper.make_node(
+        'Gather',
+        inputs=name_select_nms + [result_name + "@const_2"],
+        outputs=outputs_gather_2_,
+        axis=1)
+    node_list.append(node_gather_2_)
 
     outputs_gather_2 = [result_name + "@gather_2"]
     node_gather_2 = onnx.helper.make_node(
-        'Gather',
-        inputs=name_select_nms + [result_name + "@const_2"],
+        'Unsqueeze',
+        inputs=outputs_gather_2_,
         outputs=outputs_gather_2,
-        axis=1)
+        axes=[0])
     node_list.append(node_gather_2)
-
-    #slice the class is not 0
-    if background == 0:
-        outputs_nonzero = [result_name + "@nonzero"]
-        node_nonzero = onnx.helper.make_node(
-            'NonZero', inputs=outputs_squeeze_gather_1, outputs=outputs_nonzero)
-        node_list.append(node_nonzero)
-    else:
-        name_thresh = [result_name + "@thresh"]
-        node_thresh = onnx.helper.make_node(
-            'Constant',
-            inputs=[],
-            outputs=name_thresh,
-            value=onnx.helper.make_tensor(
-                name=name_thresh[0] + "@const",
-                data_type=onnx.TensorProto.INT32,
-                dims=[1],
-                vals=[-1]))
-        node_list.append(node_thresh)
-
-        outputs_cast = [result_name + "@cast"]
-        node_cast = onnx.helper.make_node(
-            'Cast', inputs=outputs_squeeze_gather_1, outputs=outputs_cast, to=6)
-        node_list.append(node_cast)
-
-        outputs_greater = [result_name + "@greater"]
-        node_greater = onnx.helper.make_node(
-            'Greater',
-            inputs=outputs_cast + name_thresh,
-            outputs=outputs_greater)
-        node_list.append(node_greater)
-
-        outputs_nonzero = [result_name + "@nonzero"]
-        node_nonzero = onnx.helper.make_node(
-            'NonZero', inputs=outputs_greater, outputs=outputs_nonzero)
-        node_list.append(node_nonzero)
-
-    outputs_gather_1_nonzero = [result_name + "@gather_1_nonzero"]
-    node_gather_1_nonzero = onnx.helper.make_node(
-        'Gather',
-        inputs=outputs_gather_1 + outputs_nonzero,
-        outputs=outputs_gather_1_nonzero,
-        axis=0)
-    node_list.append(node_gather_1_nonzero)
-
-    outputs_gather_2_nonzero = [result_name + "@gather_2_nonzero"]
-    node_gather_2_nonzero = onnx.helper.make_node(
-        'Gather',
-        inputs=outputs_gather_2 + outputs_nonzero,
-        outputs=outputs_gather_2_nonzero,
-        axis=0)
-    node_list.append(node_gather_2_nonzero)
 
     # reshape scores N * C * M to (N*C*M) * 1
     outputs_reshape_scores_rank1 = [result_name + "@reshape_scores_rank1"]
@@ -230,7 +185,7 @@ def multiclass_nms(op, block):
     outputs_mul_classnum_boxnum = [result_name + "@mul_classnum_boxnum"]
     node_mul_classnum_boxnum = onnx.helper.make_node(
         'Mul',
-        inputs=outputs_gather_1_nonzero + outputs_gather_scores_dim1,
+        inputs=outputs_gather_1 + outputs_gather_scores_dim1,
         outputs=outputs_mul_classnum_boxnum)
     node_list.append(node_mul_classnum_boxnum)
 
@@ -238,7 +193,7 @@ def multiclass_nms(op, block):
     outputs_add_class_M_index = [result_name + "@add_class_M_index"]
     node_add_class_M_index = onnx.helper.make_node(
         'Add',
-        inputs=outputs_mul_classnum_boxnum + outputs_gather_2_nonzero,
+        inputs=outputs_mul_classnum_boxnum + outputs_gather_2,
         outputs=outputs_add_class_M_index)
     node_list.append(node_add_class_M_index)
 
@@ -352,8 +307,7 @@ def multiclass_nms(op, block):
     outputs_gather_topk_class = [result_name + "@gather_topk_class"]
     node_gather_topk_class = onnx.helper.make_node(
         'Gather',
-        inputs=outputs_gather_1_nonzero +
-        [outputs_topk_select_topk_indices[1]],
+        inputs=outputs_gather_1 + [outputs_topk_select_topk_indices[1]],
         outputs=outputs_gather_topk_class,
         axis=1)
     node_list.append(node_gather_topk_class)
@@ -362,8 +316,7 @@ def multiclass_nms(op, block):
     outputs_gather_topk_boxes_id = [result_name + "@gather_topk_boxes_id"]
     node_gather_topk_boxes_id = onnx.helper.make_node(
         'Gather',
-        inputs=outputs_gather_2_nonzero +
-        [outputs_topk_select_topk_indices[1]],
+        inputs=outputs_gather_2 + [outputs_topk_select_topk_indices[1]],
         outputs=outputs_gather_topk_boxes_id,
         axis=1)
     node_list.append(node_gather_topk_boxes_id)
