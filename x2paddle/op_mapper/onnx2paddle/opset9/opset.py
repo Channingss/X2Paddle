@@ -454,6 +454,7 @@ class OpSet9():
         axes = node.get_attr('axes')
         attr = {'axes': axes, 'name': string(node.layer_name)}
         if len(val_x.out_shapes[0]) == 0:
+            # paddle do not support Scalar
             if node.layer_name:
                 node.fluid_code.add_layer(
                     'reshape',
@@ -595,6 +596,7 @@ class OpSet9():
                     param_attr=None)
             elif len(val_x.out_shapes[0]) > 1:
                 if len(indices_shape) == 0:
+                    # indices is Scalar
                     gather_ = node.layer_name + '_1'
                     node.fluid_code.add_layer(
                         'gather',
@@ -616,6 +618,7 @@ class OpSet9():
                         output=node,
                         param_attr=None)
         elif axis > 0 and len(indices_shape) <= 1:
+            # paddle:gather do not support axis
             perm = list(range(len(val_x.out_shapes[0])))
             perm = [axis] + perm[:axis] + perm[axis + 1:]
             attr_trans = {'perm': perm}
@@ -641,6 +644,7 @@ class OpSet9():
                     output=node,
                     param_attr=None)
         elif axis == 0 and len(indices_shape) > 1:
+            # paddle:gather_nd different with onnx:Gather
             if val_x.out_shapes[0] is not None and isinstance(
                     val_x, ONNXGraphDataNode):
                 indices_cast = indices.layer_name + '_cast'
@@ -687,6 +691,7 @@ class OpSet9():
                     output=node,
                     param_attr={'shape': reshaped_shape})
         elif axis > 0 and len(indices_shape) > 1:
+            # paddle:gather_nd different with onnx:Gather
             from functools import reduce
             reshape_shape = reduce(lambda x, y: x * y, indices_shape)
             indices_reshape = indices.layer_name + '_shape'
@@ -743,6 +748,7 @@ class OpSet9():
                 output=node,
                 param_attr=None)
         else:
+            # paddle:scatter_nd different with onnx:ScatterND
             input_inner_indices = node.layer_name + '_input_inner_indices'
             node.fluid_code.add_layer(
                 'scatter_nd',
@@ -930,8 +936,6 @@ class OpSet9():
         val_reshaped = self.graph.get_node(node.layer.output[0], copy=True)
         attr = {}
         shape_value = _const_weight_or_none(val_shape)
-        shape_dims = len(val_shape.out_shapes[0])
-
         if shape_value is not None:
             node.fluid_code.add_layer(
                 'reshape',
@@ -939,6 +943,7 @@ class OpSet9():
                 output=node,
                 param_attr={'shape': shape_value.tolist()})
         elif len(node.out_shapes[0]) > 0 and _is_static_shape(node.out_shapes[
+                # may be can delete this case
                 0]):
             node.fluid_code.add_layer(
                 'reshape',
@@ -953,8 +958,8 @@ class OpSet9():
                 inputs=val_shape,
                 output=val_shape_cast,
                 param_attr={'dtype': string('int32')})
-            # shape may be [], come form Gather by scalar indices
             if len(val_shape.out_shapes[0]) > 0:
+                # shape may be [], come form Gather by scalar indices, cannot by reshape by scalar shape
                 node.fluid_code.add_layer(
                     'reshape',
                     inputs=val_shape_cast,
@@ -967,8 +972,8 @@ class OpSet9():
                 output=node,
                 param_attr=attr)
         else:
-            # shape may be [], come form Gather by scalar indices
             if len(val_shape.out_shapes[0]) > 0:
+                # shape may be [], come form Gather by scalar indices, cannot by reshape by scalar shape
                 node.fluid_code.add_layer(
                     'reshape',
                     inputs=val_shape,
@@ -1019,6 +1024,7 @@ class OpSet9():
         paddings, val_x = self._pad_if_asymmetric(node, pads, val_x)
 
         if auto_pad == "SAME_UPPER" or auto_pad == "SAME_LOWER":
+            # paddle do not support auto_pad
             input_shape = val_x.out_shapes[0]
             pad_h = _get_same_padding(input_shape[2], kernel_shape[0],
                                       strides[0])
@@ -1143,6 +1149,7 @@ class OpSet9():
         y_shape = val_y.out_shapes[0]
         inputs = {"x": val_x, "y": val_y}
         if y_shape[0] == 1 and x_shape[-1] != 1 and x_shape[0] != 1:
+            # onnx support [m,n,k] * [1,k,z]
             y_squeeze = val_y.layer_name + '_squeeze'
             node.fluid_code.add_layer(
                 "squeeze",
@@ -1210,6 +1217,7 @@ class OpSet9():
         val_slope = self.graph.get_input_node(node, idx=1, copy=True)
 
         mode = 'channel'
+        # onnx use slope shape to determine mode:element|channel|all
         shape_slope = val_slope.out_shapes[0]
         if len(shape_slope) == 1:
             mode = 'all'
@@ -1228,6 +1236,7 @@ class OpSet9():
         axes = node.get_attr('axes')
         attr = {'axes': axes, "name": string(node.layer_name)}
         if len(val_x.out_shapes[0]) == 1:
+            # paddle do not support Scalar
             node.fluid_code.add_layer(
                 "cast",
                 inputs=val_x,
@@ -1317,6 +1326,7 @@ class OpSet9():
                 output=node,
                 param_attr={'perm': [1, 0]})
         if val_x_dim > 1:
+            # output of paddle&onnx have different arrangement and shape
             node.fluid_code.add_layer("nonzero", inputs=val_x, output=val_x)
             node.fluid_code.add_layer(
                 "split",
@@ -1377,6 +1387,7 @@ class OpSet9():
         paddings, val_x = self._pad_if_asymmetric(node, pads, val_x)
 
         if auto_pad == "SAME_UPPER" or auto_pad == "SAME_LOWER":
+            # paddle do not support auto_pad
             input_shape = val_x.out_shapes[0]
             pad_h = _get_same_padding(input_shape[2], kernel_shape[0],
                                       strides[0])
@@ -1439,6 +1450,7 @@ class OpSet9():
         kernel_shape = node.get_attr('kernel_shape')
         convnd = len(kernel_shape)
         assert 2 <= convnd <= 3, 'only conv2d and conv3d is supported'
+        # onnx do not have num_filters attribute
         num_out_channels = val_w.out_shapes[0][0]
         fluid_op = 'conv{}d'.format(convnd)
 
@@ -1451,6 +1463,7 @@ class OpSet9():
         paddings, val_x = self._pad_if_asymmetric(node, pads, val_x)
 
         if auto_pad == "SAME_UPPER" or auto_pad == "SAME_LOWER":
+            # paddle do not support auto_pad
             pad_h = _get_same_padding(input_shape[2], kernel_shape[0],
                                       strides[0])
             pad_w = _get_same_padding(input_shape[3], kernel_shape[1],
@@ -1492,6 +1505,7 @@ class OpSet9():
         assert kernel_shape, 'kernel_shape not inferred'
         convnd = len(kernel_shape)
         assert 2 <= convnd <= 3, 'only conv2d_transpose and conv3d_transpose supported'
+        # onnx do not have num_filters attribute
         num_out_channels = val_w.out_shapes[0][1]
         fluid_op = 'conv{}d_transpose'.format(convnd)
 
@@ -1503,6 +1517,7 @@ class OpSet9():
 
         paddings, var_x = self._pad_if_asymmetric(node, pads, val_x)
 
+        # paddle do not support auto_pad
         output_size = [0, 0]
 
         output_size[0] = (val_x.out_shapes[0][2] - 1
