@@ -348,6 +348,7 @@ class ONNXGraph(Graph):
                     #    #TODO add node shape inference
                     node.dtype = value_info['dtype']
                     node.out_shapes.append(value_info['shape'])
+                    print(opt, value_info['shape'])
                 else:
                     node.out_shapes.append([])
 
