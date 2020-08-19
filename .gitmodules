@@ -1,0 +1,3 @@
+[submodule "x2paddle-flask"]
+	path = x2paddle-flask
+	url = https://github.com/Channingss/x2paddle-flask
