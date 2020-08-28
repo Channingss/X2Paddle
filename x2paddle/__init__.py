@@ -1,6 +1,7 @@
 __version__ = "0.8.4"
 
 from .core.program import PaddleProgram
+from .convert import dg2onnx
 
 program = PaddleProgram()
 

@@ -368,6 +368,16 @@ class OpSet9(object):
             outputs=op.output('Out'))
         return [flatten_x, flatten_y, shape_node, node, reshape_out]
 
+    def matmul(self, op, block):
+        x_shape = block.var(op.input('X')[0]).shape
+        y_shape = block.var(op.input('Y')[0]).shape
+        out_shape = list(block.var(op.output('Out')[0]).shape)
+        node = helper.make_node(
+            'MatMul',
+            inputs=[op.input('X')[0], op.input('Y')[0]],
+            outputs=op.output('Out'))
+        return [node]
+
     def batch_norm(self, op, block):
         kwargs = {
             'epsilon': op.attr('epsilon'),
@@ -892,20 +902,16 @@ class OpSet9(object):
             raise Exception("Unexpected situation happend in elementwise_mul")
         return node
 
-    def feed(self, op, block):
-        name = op.output('Out')[0]
-        var = block.var(name)
+    def feed(self, var, block):
         tensor_info = helper.make_tensor_value_info(
-            name=name,
+            name=var.name,
             shape=var.shape,
             elem_type=self.paddle_onnx_dtype_map[var.dtype])
         return tensor_info
 
-    def fetch(self, op, block):
-        name = op.input('X')[0]
-        var = block.var(name)
+    def fetch(self, var, block):
         tensor_info = helper.make_tensor_value_info(
-            name=name,
+            name=var.name,
             shape=var.shape,
             elem_type=self.paddle_onnx_dtype_map[var.dtype])
         return tensor_info

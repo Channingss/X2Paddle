@@ -204,6 +204,17 @@ def paddle2onnx(model_path, save_dir, opset_version=10):
         scope=fluid.global_scope(),
         opset_version=opset_version)
 
+def dg2onnx(model, input_spec, save_dir, inputs_name=None, outputs_name=None, opset_version=10):
+    from x2paddle.decoder.dynamic2static import PaddleDynamicGraphDecoder
+    from x2paddle.op_mapper.paddle2onnx.paddle_op_mapper import PaddleOpMapper
+    import paddle.fluid as fluid
+    model = PaddleDynamicGraphDecoder(model, input_spec)
+    mapper = PaddleOpMapper()
+    mapper.convert(
+        model.program,
+        save_dir,
+        scope=model.scope,
+        opset_version=opset_version)
 
 def main():
     if len(sys.argv) < 2:

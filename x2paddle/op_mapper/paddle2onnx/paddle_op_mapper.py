@@ -24,24 +24,67 @@ from onnx import helper, onnx_pb
 from x2paddle.op_mapper.paddle2onnx.opset9.opset import OpSet9
 from x2paddle.op_mapper.paddle2onnx.opset10.opset import OpSet10
 from x2paddle.op_mapper.paddle2onnx.opset11.opset import OpSet11
-
+from paddle.fluid.executor import  scope_guard
+from paddle.fluid.dygraph.base import program_desc_tracing_guard, switch_to_static_graph
 
 class PaddleOpMapper(object):
     def __init__(self):
+        self.paddle_onnx_dtype_map = {
+            core.VarDesc.VarType.FP32: onnx_pb.TensorProto.FLOAT,
+            core.VarDesc.VarType.FP64: onnx_pb.TensorProto.DOUBLE,
+            core.VarDesc.VarType.INT32: onnx_pb.TensorProto.INT32,
+            core.VarDesc.VarType.INT16: onnx_pb.TensorProto.INT16,
+            core.VarDesc.VarType.INT16: onnx_pb.TensorProto.UINT16,
+            core.VarDesc.VarType.INT64: onnx_pb.TensorProto.INT64,
+            core.VarDesc.VarType.BOOL: onnx_pb.TensorProto.BOOL
+        }
         self.support_opsets = [9, 10, 11]
         self.default_opset = 10
         self.name_counter = dict()
         self.op_set = None
 
-    def convert(self, program, save_dir, scope=None, opset_version=10):
+    def convert_weights(self, parameters):
+        nodes = list()
+        for param in parameters:
+            if param.name.endswith('feed') or param.name.endswith('fetch'):
+                continue
+            if not param.persistable:
+                continue
+            #print(param.data)
+            #break
+            weight = np.array(param.value().get_tensor())
+            tensor = helper.make_tensor(
+                name=param.name,
+                dims=param.shape,
+                data_type=self.paddle_onnx_dtype_map[param.dtype],
+                vals=weight.flatten().tolist())
+            node = helper.make_node(
+                'Constant', inputs=[], outputs=[param.name], value=tensor)
+            nodes.append(node)
+        return nodes
+
+    @switch_to_static_graph
+    def convert(self, concrete_program, save_dir, scope=None, opset_version=10):
+        program = concrete_program.main_program.clone()
+        #for param in concrete_program.parameters:
+        #    print(dir(param))
+        #    break
         self.op_set = self.create_opset(opset_version)
-        weight_nodes = self.op_set.convert_weights(program, scope=scope)
+        weight_nodes = self.convert_weights(concrete_program.parameters)
         op_nodes = list()
         input_nodes = list()
         output_nodes = list()
         unsupported_ops = set()
 
         print("Translating PaddlePaddle to ONNX...\n")
+        for block in program.blocks:
+            for feed in concrete_program.inputs:
+                if isinstance(feed, fluid.Variable):
+                    node = getattr(self.op_set, 'feed')(feed, block)
+                    input_nodes.append(node)
+            for fetch in concrete_program.outputs:
+                node = getattr(self.op_set, 'fetch')(fetch, block)
+                output_nodes.append(node)
         for block in program.blocks:
             for i, op in enumerate(block.ops):
                 sys.stdout.write("\rTotal:{}, Current:{} : {} ".format(
